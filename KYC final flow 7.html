@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Updated KYC Master Flow</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #16a34a;
+            --danger: #dc2626;
+            --warning: #ca8a04;
+            --bg: #f8fafc;
+            --text: #1e293b;
+            --node-bg: #ffffff;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            margin: 0;
+            overflow: hidden;
+            background-color: var(--bg);
+            color: var(--text);
+        }
+
+        #controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            border: 1px solid #e2e8f0;
+        }
+
+        .btn {
+            padding: 8px 12px;
+            background: white;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 13px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+        }
+
+        .btn:hover {
+            background: #f1f5f9;
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+            border: none;
+        }
+
+        .btn-primary:hover {
+            background: #1d4ed8;
+            color: white;
+        }
+
+        #canvas {
+            width: 100vw;
+            height: 100vh;
+            cursor: grab;
+        }
+
+        #canvas:active {
+            cursor: grabbing;
+        }
+
+        .node rect {
+            fill: var(--node-bg);
+            stroke: #cbd5e1;
+            stroke-width: 2px;
+            rx: 6px;
+            ry: 6px;
+        }
+
+        .node.expanded rect {
+            stroke: var(--primary);
+            stroke-width: 3px;
+        }
+
+        .node-title {
+            font-size: 12px;
+            font-weight: 700;
+            pointer-events: none;
+            text-anchor: middle;
+            fill: #0f172a;
+        }
+
+        .node-desc {
+            font-size: 10px;
+            font-weight: 400;
+            pointer-events: none;
+            text-anchor: middle;
+            fill: #475569;
+        }
+
+        .node-tag {
+            font-size: 11px;
+            font-weight: 700;
+            fill: var(--primary);
+        }
+
+        .link {
+            fill: none;
+            stroke: #94a3b8;
+            stroke-width: 2px;
+        }
+
+        /* Status Colors */
+        .node-FAIL rect { fill: #fff1f2; stroke: #f43f5e; }
+        .node-APPROVE rect { fill: #f0fdf4; stroke: #22c55e; }
+        .node-MANUAL rect { fill: #fffbeb; stroke: #f59e0b; }
+        .node-CRIMINAL rect { fill: #faf5ff; stroke: #a855f7; }
+
+        .hint {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            border: 1px solid #e2e8f0;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <strong style="margin-bottom:5px; font-size:14px;">KYC Flow Controls</strong>
+        <button class="btn btn-primary" onclick="expandAll()">Expand All</button>
+        <button class="btn" onclick="collapseAll()">Collapse All</button>
+        <div style="display:flex; gap:5px;">
+            <button class="btn" onclick="zoom(1.2)" title="Zoom In">+</button>
+            <button class="btn" onclick="zoom(0.8)" title="Zoom Out">-</button>
+            <button class="btn" onclick="resetZoom()">Reset View</button>
+        </div>
+    </div>
+
+    <div class="hint">💡 <b>Click boxes</b> to toggle branches. <b>Drag</b> to pan. <b>Scroll</b> to zoom.</div>
+
+    <svg id="canvas"></svg>
+
+    <script>
+        // --- DATA DEFINITION ---
+        
+        // Parent Flow logic strictly following Screenshot 2026-02-11 at 11.56.02 AM.png
+        const getParentFlowInner = (tagLabel) => ({
+            name: "Parents Aadhaar card via Digilocker",
+            tag: tagLabel,
+            desc: "Fetch parent data via Digilocker",
+            children: [
+                {
+                    name: "Name match between student and Parent",
+                    children: [
+                        {
+                            name: "Address Match student and parent",
+                            tag: "> 80%",
+                            children: [
+                                { name: "KYC Approved", tag: "> 80%", type: "APPROVE" },
+                                { 
+                                    name: "Criminal Record Check", 
+                                    tag: "< 80%", 
+                                    type: "CRIMINAL",
+                                    children: [{ name: "Manual Flow", type: "MANUAL" }] 
+                                }
+                            ]
+                        },
+                        {
+                            name: "Address Match student and parent",
+                            tag: "< 80%",
+                            children: [
+                                { 
+                                    name: "Criminal Record Check", 
+                                    tag: "ANY RESULT", 
+                                    type: "CRIMINAL",
+                                    children: [{ name: "Manual Flow", type: "MANUAL" }] 
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+
+        const kycData = {
+            name: "Customer Entry",
+            tag: "START",
+            children: [
+                {
+                    name: "Pancard, CIBIL & Occupation Screen",
+                    desc: "1. T&C Acceptance\n2. Name Exact Match Check\n3. Invoice/Account Name Popup\n4. Occupation Input\n5. CIBIL Scoring (no_of_write_offs = 0 ,No. of Suit Filed Accounts = 0,Total Payment Summary - ON time payment % > 60\n6. Unique PAN Verification",
+                    tag: "STEP 1",
+                    children: [
+                        { name: "KYC Failed", tag: "CIBIL < 500", type: "FAIL" },
+                        {
+                            name: "Aadhaar + PAN Verification",
+                            tag: "CIBIL >= 500 OR NO CIBIL",
+                            desc: "Checks: Name match (X%)\nData: DOB, GENDER, AGE",
+                            children: [
+                                { 
+                                    name: "KYC Failed", 
+                                    tag: "AGE < 18", 
+                                    type: "FAIL",
+                                    desc: "Customer must be 18+ years old"
+                                },
+                                {
+                                    name: "OCR Flow",
+                                    tag: "AGE >= 18 & FAIL/TIMEOUT",
+                                    children: [
+                                        { name: "KYC Fail (Allowed to Retry)", type: "FAIL", tag: "NO" },
+                                        { 
+                                            name: "Directing to Chosen Path", 
+                                            tag: "YES (OCR SUCCESS)", 
+                                            children: getOccupationPaths() 
+                                        }
+                                    ]
+                                },
+                                {
+                                    name: "Directing to Chosen Path",
+                                    tag: "AGE >= 18 & MATCH SUCCESS",
+                                    children: getOccupationPaths()
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        };
+
+        function getOccupationPaths() {
+            const bankAnalysisDesc = "1. name match check\n2. Last 3 months bank statement check";
+            
+            return [
+                {
+                    name: "Salaried Path",
+                    children: [
+                        { 
+                            name: "EPFO Verification", 
+                            desc: "Approved on Success OR Timeout",
+                            tag: "CIBIL > 700",
+                            children: [{ name: "KYC Approved", type: "APPROVE" }]
+                        },
+                        { 
+                            name: "CIBIL 500-700", 
+                            children: [
+                                { 
+                                    name: "EPFO Verification", 
+                                    children: [
+                                        { name: "KYC Approved", tag: "SUCCESS", type: "APPROVE" },
+                                        {
+                                            name: "PAN Card Scoring",
+                                            tag: "TIMEOUT",
+                                            children: [
+                                                { name: "KYC Approved", tag: "GREEN", type: "APPROVE" },
+                                                {
+                                                    name: "Work Email Verification",
+                                                    tag: "RED",
+                                                    children: [
+                                                        { name: "KYC Approved", tag: "SUCCESS", type: "APPROVE" },
+                                                        {
+                                                            name: "Bank Statement Analysis",
+                                                            tag: "NO / TIMEOUT",
+                                                            desc: bankAnalysisDesc,
+                                                            children: [
+                                                                { name: "KYC Approved", tag: "GREEN", type: "APPROVE" },
+                                                                { 
+                                                                    name: "Criminal Record Check", 
+                                                                    tag: "RED", 
+                                                                    type: "CRIMINAL",
+                                                                    children: [{ name: "Manual Flow", type: "MANUAL" }] 
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "No CIBIL",
+                            children: [
+                                {
+                                    name: "EPFO Verification",
+                                    children: [
+                                        { name: "KYC Approved", tag: "SUCCESS", type: "APPROVE" },
+                                        {
+                                            name: "Work Email Verification",
+                                            tag: "TIMEOUT",
+                                            children: [
+                                                { name: "KYC Approved", tag: "SUCCESS", type: "APPROVE" },
+                                                {
+                                                    name: "Bank Statement Analysis",
+                                                    tag: "NO / TIMEOUT",
+                                                    desc: bankAnalysisDesc,
+                                                    children: [
+                                                        { name: "KYC Approved", tag: "GREEN", type: "APPROVE" },
+                                                        { 
+                                                            name: "Rejected", 
+                                                            tag: "RED", 
+                                                            type: "REJECTED",
+                                                            
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    name: "Student Path",
+                    children: [
+                        { 
+                            name: "PAN Card Scoring", 
+                            tag: "CIBIL > 700",
+                            children: [
+                                { name: "KYC Approved", tag: "GREEN", type: "APPROVE" },
+                                {
+                                    name: "Bank Statement Student",
+                                    tag: "RED",
+                                    desc: bankAnalysisDesc,
+                                    children: [
+                                        { name: "KYC Approved", tag: "GREEN", type: "APPROVE" },
+                                        getParentFlowInner("BANK RED (Redirect to Parent Flow)")
+                                    ]
+                                }
+                            ]
+                        },
+                        getParentFlowInner("CIBIL < 700 / NO CIBIL")
+                    ]
+                },
+                {
+                    name: "Self-Employed / Freelancer",
+                    children: [
+                        { 
+                            name: "PAN Card Scoring", 
+                            tag: "CIBIL > 700", 
+                            children: [{ name: "KYC Approved", desc: "Approved on Red/Green", type: "APPROVE" }]
+                        },
+                        { 
+                            name: "CIBIL 500-700", 
+                            children: [
+                                { name: "KYC Approved", tag: "PAN GREEN", type: "APPROVE" },
+                                {
+                                    name: "Bank Statement Analysis",
+                                    tag: "PAN RED",
+                                    desc: bankAnalysisDesc,
+                                    children: [
+                                        { name: "KYC Approved", tag: "BANK GREEN", type: "APPROVE" },
+                                        { 
+                                            name: "Criminal Record Check", 
+                                            tag: "BANK RED", 
+                                            type: "CRIMINAL",
+                                            children: [{ name: "Manual Flow", type: "MANUAL" }] 
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        { 
+                            name: "No CIBIL", 
+                            children: [
+                                
+                                {
+                                    name: "Bank Statement Analysis",
+                                    tag: "BANK",
+                                    desc: bankAnalysisDesc,
+                                    children: [
+                                        { name: "KYC Approved", tag: "BANK GREEN", type: "APPROVE" },
+                                        { 
+                                            name: "REJECTED", 
+                                            tag: "BANK RED", 
+                                            type: "REJECTED",
+                                            
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ];
+        }
+
+        // --- D3 RENDER ENGINE ---
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const nodeWidth = 220; 
+        const nodeHeight = 85;  
+        const duration = 400;
+
+        let root;
+        let i = 0;
+
+        const svg = d3.select("#canvas")
+            .attr("width", width)
+            .attr("height", height);
+
+        const g = svg.append("g");
+
+        const zoomBehavior = d3.zoom()
+            .scaleExtent([0.1, 3])
+            .on("zoom", (event) => g.attr("transform", event.transform));
+
+        svg.call(zoomBehavior);
+
+        const tree = d3.tree().nodeSize([nodeHeight + 60, nodeWidth + 120]);
+
+        root = d3.hierarchy(kycData, d => d.children);
+        root.x0 = height / 2;
+        root.y0 = 0;
+
+        root.children.forEach(collapse);
+        update(root);
+
+        function collapse(d) {
+            if (d.children) {
+                d._children = d.children;
+                d._children.forEach(collapse);
+                d.children = null;
+            }
+        }
+
+        function expand(d) {
+            if (d._children) {
+                d.children = d._children;
+                d._children = null;
+            }
+            if (d.children) {
+                d.children.forEach(expand);
+            }
+        }
+
+        function update(source) {
+            const nodes = tree(root).descendants();
+            const links = nodes.slice(1);
+
+            nodes.forEach(d => d.y = d.depth * (nodeWidth + 100));
+
+            const node = g.selectAll("g.node")
+                .data(nodes, d => d.id || (d.id = ++i));
+
+            const nodeEnter = node.enter().append("g")
+                .attr("class", d => `node node-${d.data.type || 'DEFAULT'}`)
+                .attr("transform", d => `translate(${source.y0},${source.x0})`)
+                .style("cursor", "pointer")
+                .on("click", (event, d) => {
+                    if (d.children) {
+                        d._children = d.children;
+                        d.children = null;
+                    } else {
+                        d.children = d._children;
+                        d._children = null;
+                    }
+                    update(d);
+                });
+
+            nodeEnter.append("rect")
+                .attr("width", nodeWidth)
+                .attr("height", nodeHeight)
+                .attr("x", -nodeWidth / 2)
+                .attr("y", -nodeHeight / 2);
+
+            nodeEnter.append("text")
+                .attr("class", "node-title")
+                .attr("y", -nodeHeight / 2 + 20)
+                .text(d => d.data.name)
+                .call(wrap, nodeWidth - 20);
+
+            nodeEnter.append("text")
+                .attr("class", "node-desc")
+                .attr("y", 10)
+                .text(d => d.data.desc || "")
+                .call(wrapDesc, nodeWidth - 25);
+
+            nodeEnter.append("text")
+                .attr("class", "node-tag")
+                .attr("y", -(nodeHeight / 2) - 8)
+                .attr("text-anchor", "middle")
+                .text(d => d.data.tag || "");
+
+            const nodeUpdate = nodeEnter.merge(node);
+
+            nodeUpdate.transition()
+                .duration(duration)
+                .attr("transform", d => `translate(${d.y},${d.x})`)
+                .attr("class", d => `node node-${d.data.type || 'DEFAULT'} ${d.children ? 'expanded' : ''}`);
+
+            const nodeExit = node.exit().transition()
+                .duration(duration)
+                .attr("transform", d => `translate(${source.y},${source.x})`)
+                .remove();
+
+            const link = g.selectAll("path.link")
+                .data(links, d => d.id);
+
+            const linkEnter = link.enter().insert("path", "g")
+                .attr("class", "link")
+                .attr("d", d => {
+                    const o = { x: source.x0, y: source.y0 };
+                    return diagonal(o, o);
+                });
+
+            link.merge(linkEnter).transition()
+                .duration(duration)
+                .attr("d", d => diagonal(d.parent, d));
+
+            link.exit().transition()
+                .duration(duration)
+                .attr("d", d => {
+                    const o = { x: source.x, y: source.y };
+                    return diagonal(o, o);
+                })
+                .remove();
+
+            nodes.forEach(d => {
+                d.x0 = d.x;
+                d.y0 = d.y;
+            });
+        }
+
+        function diagonal(s, d) {
+            return `M ${s.y} ${s.x}
+                    C ${(s.y + d.y) / 2} ${s.x},
+                      ${(s.y + d.y) / 2} ${d.x},
+                      ${d.y} ${d.x}`;
+        }
+
+        function wrap(text, width) {
+            text.each(function() {
+                let text = d3.select(this),
+                    words = text.text().split(/\s+/).reverse(),
+                    word, line = [], lineNumber = 0, lineHeight = 1.1,
+                    y = text.attr("y"), tspan = text.text(null).append("tspan").attr("x", 0).attr("y", y);
+                while (word = words.pop()) {
+                    line.push(word);
+                    tspan.text(line.join(" "));
+                    if (tspan.node().getComputedTextLength() > width) {
+                        line.pop();
+                        tspan.text(line.join(" "));
+                        line = [word];
+                        tspan = text.append("tspan").attr("x", 0).attr("y", y).attr("dy", ++lineNumber * lineHeight + "em").text(word);
+                    }
+                }
+            });
+        }
+
+        function wrapDesc(text, width) {
+            text.each(function() {
+                let text = d3.select(this),
+                    content = text.text(),
+                    lines = content.split('\n'),
+                    y = text.attr("y");
+                
+                text.text(null);
+                lines.forEach((lineText, idx) => {
+                    text.append("tspan")
+                        .attr("x", 0)
+                        .attr("y", y)
+                        .attr("dy", (idx * 1.2) + "em")
+                        .text(lineText);
+                });
+            });
+        }
+
+        window.zoom = function(factor) { svg.transition().call(zoomBehavior.scaleBy, factor); };
+        window.resetZoom = function() {
+            svg.transition().call(zoomBehavior.transform, d3.zoomIdentity.translate(100, height/2).scale(0.8));
+        };
+        window.expandAll = function() { expand(root); update(root); };
+        window.collapseAll = function() { if (root.children) root.children.forEach(collapse); update(root); };
+
+        resetZoom();
+    </script>
+</body>
+</html>
